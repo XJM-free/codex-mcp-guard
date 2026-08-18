@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-mcp-guard"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 description = "A read-only lifecycle auditor for MCP helpers correlated with Codex subagents"
 readme = "README.md"
 requires-python = ">=3.10"

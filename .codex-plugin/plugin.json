@@ -1,6 +1,6 @@
 {
   "name": "codex-mcp-guard",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Read-only lifecycle auditing for MCP helpers correlated with Codex subagents.",
   "author": {
     "name": "Jesse Vale",
@@ -13,16 +13,16 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex MCP Guard",
-    "shortDescription": "Audit retained subagent MCP helpers",
-    "longDescription": "Correlates read-only process snapshots with subagent lifecycle hooks and reports helper candidates that remain after stop.",
+    "shortDescription": "Read-only MCP candidate audit; no cleanup",
+    "longDescription": "Compares read-only process snapshots across subagent lifecycle hooks and reports ambiguous or retained window candidates without claiming ownership.",
     "developerName": "Jesse Vale",
     "category": "Productivity",
     "capabilities": ["Diagnostics", "Read-only"],
     "websiteURL": "https://github.com/XJM-free/codex-mcp-guard",
     "defaultPrompt": [
-      "Check whether Codex is leaking MCP helpers.",
-      "Show Codex MCP Guard status.",
-      "Explain an ambiguous lifecycle correlation."
+      "Audit candidate MCP helpers without asserting ownership or a leak.",
+      "Show a redacted, freshly revalidated Codex MCP Guard summary.",
+      "Explain a retained-candidate result and the safe next steps."
     ]
   }
 }

@@ -5,16 +5,23 @@ import os
 import re
 import shlex
 import subprocess
+import threading
+import time
 from collections.abc import Iterable, Mapping
 from datetime import datetime
+from typing import Any
 
 from .models import ProcessCohort, ProcessInfo
 
 _UNIX_PS_RE = re.compile(
-    r"^\s*(?P<pid>\d+)\s+(?P<ppid>\d+)\s+(?P<pgid>\d+)\s+"
+    r"^\s*(?P<pid>\d+)\s+(?P<ppid>\d+)\s+(?P<pgid>\d+)\s+(?P<rss>\d+)\s+"
     r"(?P<started>\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+"
     r"(?P<command>.*)$"
 )
+MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
+MAX_SNAPSHOT_STDERR_BYTES = 64 * 1024
+UNIX_SNAPSHOT_TIMEOUT_SECONDS = 5.0
+WINDOWS_SNAPSHOT_TIMEOUT_SECONDS = 8.0
 _RUNTIME_EXECUTABLES = {
     "bun",
     "bun.exe",
@@ -46,6 +53,34 @@ _PACKAGE_RUNNERS = {
     "yarn.cmd",
 }
 _SHELL_EXECUTABLES = {"bash", "dash", "fish", "sh", "zsh"}
+_NODE_OPTIONS_WITH_VALUE = {
+    "--conditions",
+    "--diagnostic-dir",
+    "--eval",
+    "--experimental-loader",
+    "--heapsnapshot-signal",
+    "--icu-data-dir",
+    "--import",
+    "--inspect-port",
+    "--loader",
+    "--openssl-config",
+    "--print",
+    "--redirect-warnings",
+    "--require",
+    "--title",
+    "-e",
+    "-p",
+    "-r",
+}
+_PYTHON_OPTIONS_WITH_VALUE = {"--check-hash-based-pycs", "-W", "-X"}
+_RUNNER_PACKAGE_OPTIONS = {"--from", "--package", "-p"}
+_RUNNER_OPTIONS_WITH_VALUE = {
+    "--cache",
+    "--prefix",
+    "--registry",
+    "--workspace",
+    "-C",
+}
 _RUNNABLE_SUFFIXES = {
     "",
     ".bat",
@@ -73,60 +108,169 @@ class SystemProcessBackend(ProcessBackend):
         return _snapshot_unix()
 
 
+def _run_capped_snapshot(
+    command: list[str],
+    *,
+    timeout: float,
+    env: Mapping[str, str] | None = None,
+    max_stdout_bytes: int = MAX_SNAPSHOT_BYTES,
+    max_stderr_bytes: int = MAX_SNAPSHOT_STDERR_BYTES,
+) -> str:
+    inventory_child = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=dict(env) if env is not None else None,
+    )
+    assert inventory_child.stdout is not None
+    assert inventory_child.stderr is not None
+    stdout = bytearray()
+    stderr = bytearray()
+    overflow = threading.Event()
+    reader_errors: list[OSError | ValueError] = []
+
+    def read_capped(stream: Any, destination: bytearray, limit: int) -> None:
+        try:
+            with stream:
+                while chunk := stream.read(64 * 1024):
+                    remaining = limit + 1 - len(destination)
+                    if remaining > 0:
+                        destination.extend(chunk[:remaining])
+                    if len(destination) > limit or len(chunk) > remaining:
+                        overflow.set()
+                        return
+        except (OSError, ValueError) as error:
+            reader_errors.append(error)
+
+    readers = [
+        threading.Thread(
+            target=read_capped,
+            args=(inventory_child.stdout, stdout, max_stdout_bytes),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=read_capped,
+            args=(inventory_child.stderr, stderr, max_stderr_bytes),
+            daemon=True,
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    while inventory_child.poll() is None:
+        if overflow.is_set():
+            break
+        if time.monotonic() >= deadline:
+            timed_out = True
+            break
+        overflow.wait(0.01)
+
+    if inventory_child.poll() is None:
+        try:
+            inventory_child.kill()
+        except ProcessLookupError:
+            pass
+    inventory_child.wait()
+    for reader in readers:
+        reader.join(timeout=0.2)
+    if any(reader.is_alive() for reader in readers):
+        for stream in (inventory_child.stdout, inventory_child.stderr):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+        for reader in readers:
+            reader.join(timeout=0.8)
+
+    decoded_stdout = bytes(stdout[:max_stdout_bytes]).decode("utf-8", errors="replace")
+    decoded_stderr = bytes(stderr[:max_stderr_bytes]).decode("utf-8", errors="replace")
+    if timed_out:
+        raise subprocess.TimeoutExpired(
+            command, timeout, output=decoded_stdout, stderr=decoded_stderr
+        )
+    if overflow.is_set():
+        raise ValueError(
+            f"process snapshot exceeds {max_stdout_bytes} stdout bytes or "
+            f"{max_stderr_bytes} stderr bytes"
+        )
+    if any(reader.is_alive() for reader in readers):
+        raise RuntimeError("process snapshot reader did not stop")
+    if reader_errors:
+        raise OSError(f"process snapshot reader failed: {reader_errors[0]}")
+    if inventory_child.returncode:
+        raise subprocess.CalledProcessError(
+            inventory_child.returncode,
+            command,
+            output=decoded_stdout,
+            stderr=decoded_stderr,
+        )
+    return decoded_stdout
+
+
 def _snapshot_unix() -> dict[int, ProcessInfo]:
     environment = os.environ.copy()
     environment["LC_ALL"] = "C"
-    completed = subprocess.run(
-        ["ps", "-axo", "pid=,ppid=,pgid=,lstart=,command="],
-        check=True,
-        capture_output=True,
-        text=True,
+    output = _run_capped_snapshot(
+        ["ps", "-axo", "pid=,ppid=,pgid=,rss=,lstart=,command="],
         env=environment,
+        timeout=UNIX_SNAPSHOT_TIMEOUT_SECONDS,
     )
-    local_timezone = datetime.now().astimezone().tzinfo
     processes: dict[int, ProcessInfo] = {}
-    for line in completed.stdout.splitlines():
+    for line in output.splitlines():
         match = _UNIX_PS_RE.match(line)
         if not match:
             continue
-        started = datetime.strptime(
-            match.group("started"), "%a %b %d %H:%M:%S %Y"
-        ).replace(tzinfo=local_timezone)
+        try:
+            started_at = _parse_unix_started_at(match.group("started"))
+        except ValueError:
+            continue
         process = ProcessInfo(
             pid=int(match.group("pid")),
             ppid=int(match.group("ppid")),
             pgid=int(match.group("pgid")),
-            started_at=started.timestamp(),
+            started_at=started_at,
             command=match.group("command").strip(),
+            rss_bytes=int(match.group("rss")) * 1024,
         )
         processes[process.pid] = process
     return processes
 
 
+def _parse_unix_started_at(value: str) -> float:
+    return datetime.strptime(value, "%a %b %d %H:%M:%S %Y").astimezone().timestamp()
+
+
 def _snapshot_windows() -> dict[int, ProcessInfo]:
     script = r"""
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $items = Get-CimInstance Win32_Process | ForEach-Object {
   [PSCustomObject]@{
     pid = [int]$_.ProcessId
     ppid = [int]$_.ParentProcessId
     started_at = if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null }
     command = if ($_.CommandLine) { $_.CommandLine } elseif ($_.ExecutablePath) { $_.ExecutablePath } else { $_.Name }
+    rss = if ($_.WorkingSetSize) { [int64]$_.WorkingSetSize } else { $null }
   }
 }
 $items | ConvertTo-Json -Compress
 """
-    completed = subprocess.run(
+    output = _run_capped_snapshot(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-        check=True,
-        capture_output=True,
-        text=True,
+        timeout=WINDOWS_SNAPSHOT_TIMEOUT_SECONDS,
     )
-    raw = json.loads(completed.stdout or "[]")
-    if isinstance(raw, dict):
+    raw = json.loads(output or "[]")
+    if raw is None:
+        raw = []
+    elif isinstance(raw, dict):
         raw = [raw]
+    elif not isinstance(raw, list):
+        raise ValueError("Windows process snapshot must be a JSON array")
     processes: dict[int, ProcessInfo] = {}
     for item in raw:
-        if not item.get("started_at"):
+        if not isinstance(item, dict) or not item.get("started_at"):
             continue
         started_at = datetime.fromisoformat(
             item["started_at"].replace("Z", "+00:00")
@@ -137,6 +281,7 @@ $items | ConvertTo-Json -Compress
             pgid=None,
             started_at=started_at,
             command=str(item.get("command") or ""),
+            rss_bytes=(int(item["rss"]) if item.get("rss") is not None else None),
         )
         processes[process.pid] = process
     return processes
@@ -203,24 +348,19 @@ def _looks_like_mcp_launch(tokens: list[str]) -> bool:
     if executable in _RUNTIME_EXECUTABLES:
         if _contains_mcp_component(executable_path):
             return True
-        script = _first_positional(cleaned[1:])
+        script = _runtime_entrypoint(cleaned[1:])
         return bool(script and _is_mcp_runnable(script))
 
     if executable in _PYTHON_EXECUTABLES:
-        arguments = cleaned[1:]
-        if "-m" in arguments[:3]:
-            module_index = arguments.index("-m") + 1
-            return module_index < len(arguments) and _contains_mcp_component(
-                arguments[module_index]
-            )
-        script = _first_positional(arguments)
-        return bool(script and _is_mcp_runnable(script))
+        kind, entrypoint = _python_entrypoint(cleaned[1:])
+        if kind == "module":
+            return bool(entrypoint and _contains_mcp_component(entrypoint))
+        return bool(entrypoint and _is_mcp_runnable(entrypoint))
 
-    arguments = cleaned[1:]
-    if arguments and arguments[0].lower() in {"exec", "x", "dlx"}:
-        arguments = arguments[1:]
-    package = _first_positional(arguments)
-    return bool(package and _contains_mcp_component(package))
+    return any(
+        _contains_mcp_component(package)
+        for package in _runner_package_candidates(cleaned[1:])
+    )
 
 
 def _split_command(command: str) -> list[str]:
@@ -236,10 +376,88 @@ def _basename(token: str) -> str:
     return re.split(r"[/\\]", token)[-1]
 
 
-def _first_positional(tokens: list[str]) -> str | None:
-    return next(
-        (token for token in tokens if token and not token.startswith("-")), None
-    )
+def _runtime_entrypoint(tokens: list[str]) -> str | None:
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return tokens[index + 1] if index + 1 < len(tokens) else None
+        option = token.split("=", 1)[0]
+        if option in {"--eval", "--print", "-e", "-p"}:
+            return None
+        if option in _NODE_OPTIONS_WITH_VALUE:
+            index += 1 if "=" in token else 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token
+    return None
+
+
+def _python_entrypoint(tokens: list[str]) -> tuple[str | None, str | None]:
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return (
+                ("script", tokens[index + 1])
+                if index + 1 < len(tokens)
+                else (None, None)
+            )
+        if token == "-m":
+            return (
+                ("module", tokens[index + 1])
+                if index + 1 < len(tokens)
+                else (None, None)
+            )
+        if token == "-c" or token.startswith("-c"):
+            return None, None
+        option = token.split("=", 1)[0]
+        if option in _PYTHON_OPTIONS_WITH_VALUE:
+            index += 1 if "=" in token else 2
+            continue
+        if token.startswith(("-W", "-X")):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return "script", token
+    return None, None
+
+
+def _runner_package_candidates(tokens: list[str]) -> list[str]:
+    arguments = list(tokens)
+    if arguments and arguments[0].lower() in {"exec", "x", "dlx"}:
+        arguments = arguments[1:]
+    packages: list[str] = []
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        option, separator, attached = token.partition("=")
+        if option in _RUNNER_PACKAGE_OPTIONS:
+            if separator:
+                packages.append(attached)
+                index += 1
+            elif index + 1 < len(arguments):
+                packages.append(arguments[index + 1])
+                index += 2
+            else:
+                index += 1
+            continue
+        if option in _RUNNER_OPTIONS_WITH_VALUE:
+            index += 1 if separator else 2
+            continue
+        if token == "--":
+            packages.extend(arguments[index + 1 : index + 2])
+            break
+        if token.startswith("-"):
+            index += 1
+            continue
+        packages.append(token)
+        break
+    return packages
 
 
 def _is_mcp_runnable(token: str) -> bool:
@@ -299,6 +517,41 @@ def cluster_processes(
         else:
             clusters.append([process])
     return [ProcessCohort(tuple(cluster)) for cluster in clusters]
+
+
+def process_group_rss_bytes(
+    snapshot: Mapping[int, ProcessInfo], root: ProcessInfo
+) -> int | None:
+    if root.pgid is not None:
+        members = [
+            process for process in snapshot.values() if process.pgid == root.pgid
+        ]
+    else:
+        members = _process_tree(snapshot, root.pid)
+    if not members or any(process.rss_bytes is None for process in members):
+        return None
+    return sum(int(process.rss_bytes) for process in members)
+
+
+def _process_tree(
+    snapshot: Mapping[int, ProcessInfo], root_pid: int
+) -> list[ProcessInfo]:
+    children: dict[int, list[ProcessInfo]] = {}
+    for process in snapshot.values():
+        children.setdefault(process.ppid, []).append(process)
+    result: list[ProcessInfo] = []
+    pending = [root_pid]
+    seen: set[int] = set()
+    while pending:
+        pid = pending.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        process = snapshot.get(pid)
+        if process is not None:
+            result.append(process)
+        pending.extend(child.pid for child in children.get(pid, []))
+    return result
 
 
 def verify_identity(

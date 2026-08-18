@@ -18,7 +18,17 @@ class ConfigTests(unittest.TestCase):
             if os.name != "nt":
                 path.chmod(0o600)
             config = load_config(root)
-        self.assertFalse(hasattr(config, "mode"))
+            self.assertFalse(hasattr(config, "mode"))
+
+    def test_boolean_is_not_accepted_as_a_numeric_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "config.json"
+            path.write_text('{"cohort_window_seconds":true}\n', encoding="utf-8")
+            if os.name != "nt":
+                path.chmod(0o600)
+            with self.assertRaisesRegex(ValueError, "finite number"):
+                load_config(root)
 
     def test_symlinked_config_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

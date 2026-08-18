@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -22,6 +22,7 @@ class ProcessInfo:
     pgid: int | None
     started_at: float
     command: str
+    rss_bytes: int | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -51,4 +52,16 @@ class ProcessCohort:
         return max(process.started_at for process in self.processes)
 
     def as_dict(self) -> dict[str, Any]:
-        return {"processes": [asdict(process) for process in self.processes]}
+        return {
+            "processes": [
+                {
+                    "pid": process.pid,
+                    "ppid": process.ppid,
+                    "pgid": process.pgid,
+                    "started_at": process.started_at,
+                    "command_sha256": process.fingerprint,
+                    "rss_bytes": process.rss_bytes,
+                }
+                for process in self.processes
+            ]
+        }

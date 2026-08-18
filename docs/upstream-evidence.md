@@ -20,16 +20,18 @@ themselves establish that every completed subagent turn immediately releases its
 MCP runtime. Codex MCP Guard observes the interval between turn completion and a
 later shutdown or eviction boundary.
 
-The current [Codex Hooks documentation](https://learn.chatgpt.com/docs/hooks)
+The current [Codex Hooks documentation](https://developers.openai.com/codex/hooks)
 documents `SubagentStart`, `SubagentStop`, user hook configuration, plugin hook
 layout, `PLUGIN_ROOT`, and trust review. Current source schemas include:
 
 - [SubagentStart command input](https://github.com/openai/codex/blob/main/codex-rs/hooks/schema/generated/subagent-start.command.input.schema.json)
 - [SubagentStop command input](https://github.com/openai/codex/blob/main/codex-rs/hooks/schema/generated/subagent-stop.command.input.schema.json)
 
-These payloads identify lifecycle events and transcript paths. They do not expose
-an authoritative helper PID/handle or launch generation. This repository
-therefore treats all process association as diagnostic correlation.
+These payloads identify lifecycle events and transcript paths. The common
+`transcript_path` is the parent session transcript; it is not a subagent launch
+clock. The payloads do not expose an authoritative helper PID/handle or launch
+generation. This repository therefore uses only a conservative Start/Stop snapshot
+delta and treats every association as unproven.
 
 An upstream fix can safely close the remaining window by shutting down the MCP
 runtime at the appropriate idle boundary and marking the client for lazy

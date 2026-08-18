@@ -9,7 +9,7 @@
             "command": "CODEX_MCP_GUARD_HOOK=1 python3 \"$PLUGIN_ROOT/scripts/hook.py\"",
             "commandWindows": "set \"CODEX_MCP_GUARD_HOOK=1\" && python \"%PLUGIN_ROOT%\\scripts\\hook.py\"",
             "timeout": 15,
-            "statusMessage": "Recording MCP helper candidates"
+            "statusMessage": "Recording MCP helper baseline"
           }
         ]
       }
@@ -22,7 +22,7 @@
             "command": "CODEX_MCP_GUARD_HOOK=1 python3 \"$PLUGIN_ROOT/scripts/hook.py\"",
             "commandWindows": "set \"CODEX_MCP_GUARD_HOOK=1\" && python \"%PLUGIN_ROOT%\\scripts\\hook.py\"",
             "timeout": 15,
-            "statusMessage": "Checking retained MCP helper candidates"
+            "statusMessage": "Comparing MCP helper snapshot"
           }
         ]
       }

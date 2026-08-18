@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ast
 import json
 import re
 import sys
@@ -32,8 +33,12 @@ REQUIRED_FILES = {
 }
 VERSION_RE = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
-    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
+BANNED_PROCESS_MODULES = {"ctypes", "psutil", "signal"}
+BANNED_PROCESS_CALLS = {"kill", "killpg", "send_signal", "terminate"}
+BANNED_PROCESS_COMMANDS = {"killall", "pkill", "taskkill"}
 
 
 def fail(message: str) -> None:
@@ -106,12 +111,12 @@ def main() -> int:
         if any(int(handler.get("timeout", 0)) > 15 for handler in handlers):
             fail(f"{event} hook timeout exceeds 15 seconds")
 
-    source = "\n".join(path.read_text("utf-8") for path in (ROOT / "src").rglob("*.py"))
-    forbidden = ("killpg(", "taskkill", "os.kill(", ".terminate(")
-    found = [token for token in forbidden if token in source]
-    if found:
+    violations: list[str] = []
+    for path in sorted((ROOT / "src").rglob("*.py")):
+        violations.extend(_audit_only_violations(path))
+    if violations:
         fail(
-            f"audit-only source contains process termination paths: {', '.join(found)}"
+            "audit-only source contains process-control paths: " + "; ".join(violations)
         )
 
     skill = (ROOT / "skills/codex-mcp-guard/SKILL.md").read_text("utf-8")
@@ -128,9 +133,11 @@ def main() -> int:
         "build",
         "dist",
     }
+    ignored_names = {".coverage", ".DS_Store", "uv.lock"}
     for path in ROOT.rglob("*"):
         if (
             not path.is_file()
+            or path.name in ignored_names
             or any(part in ignored_parts for part in path.parts)
             or any(part.endswith(".egg-info") for part in path.parts)
         ):
@@ -147,6 +154,55 @@ def main() -> int:
 
     print(f"release validation passed for {version}")
     return 0
+
+
+def _audit_only_violations(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text("utf-8"), filename=str(path))
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".", 1)[0]
+                if root in BANNED_PROCESS_MODULES:
+                    violations.append(f"{path.name}:{node.lineno}: import {root}")
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            root = node.module.split(".", 1)[0]
+            if root in BANNED_PROCESS_MODULES:
+                violations.append(f"{path.name}:{node.lineno}: import {root}")
+        elif isinstance(node, ast.Call):
+            call_name = _call_name(node.func)
+            owned_inventory_stop = (
+                path.name == "processes.py" and call_name == "inventory_child.kill"
+            )
+            if (
+                call_name.split(".")[-1] in BANNED_PROCESS_CALLS
+                and not owned_inventory_stop
+            ):
+                violations.append(f"{path.name}:{node.lineno}: call {call_name}")
+            if any(
+                isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+                and value.value.lower() in BANNED_PROCESS_COMMANDS
+                for value in ast.walk(node)
+            ):
+                violations.append(f"{path.name}:{node.lineno}: process-control command")
+            if any(
+                keyword.arg == "shell"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value is True
+                for keyword in node.keywords
+            ):
+                violations.append(f"{path.name}:{node.lineno}: shell=True")
+    return violations
+
+
+def _call_name(node: ast.expr) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _call_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return ""
 
 
 if __name__ == "__main__":

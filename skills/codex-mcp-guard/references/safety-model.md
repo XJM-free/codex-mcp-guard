@@ -1,31 +1,40 @@
 # Safety model
 
-## Non-authoritative evidence
+## Evidence grades
 
-Subagent Hooks identify a lifecycle event but do not provide an authoritative
-helper-process handle, launch generation, or ownership token. Process start time,
-parentage, process group, and command fingerprint are correlations only.
+Codex Hooks do not provide an authoritative helper-process handle, launch
+generation, or ownership token. The common `transcript_path` belongs to the parent
+session and is never a subagent start clock.
 
-Label a cohort `correlated` only when the bounded time, uniqueness, repeated
-fingerprint, and unclaimed-identity checks all pass. Otherwise keep it
-`report-only`.
+- `baseline-only`: Start recorded a bounded snapshot; no lifecycle claim exists.
+- `window-delta`: a cohort was absent at Start and live at Stop inside one
+  non-overlapping observation window. Ownership remains unproven.
+- `ambiguous`: competing cohorts, overlapping subagents, malformed state, or missing
+  evidence require `report-only`.
+- `retired`: v1 transcript-clock evidence is preserved only as
+  `legacy-report-only`.
+
+This model can miss helpers that start before the Start Hook snapshot or exit before
+the Stop snapshot. Prefer that false-negative boundary over assigning old or
+concurrent processes to a subagent.
 
 ## Read-only invariant
 
-Never send a signal, invoke `taskkill`, or add a terminate method to the process
-backend. External termination can race PID reuse and can leave a resident
-subagent with a dead MCP connection. Escalate a requested cleanup feature to an
-upstream lifecycle design instead of weakening this invariant.
+Never send a signal, invoke `kill`, `pkill`, `killall`, or `taskkill`, call a process-
+termination API, or use UI automation to force-quit a candidate. This prohibition
+applies even when the user requests cleanup. External termination can race PID reuse
+and can leave a resident subagent with a dead MCP connection.
+
+Escalate automatic cleanup to an upstream lifecycle design that can atomically close
+the MCP client and arrange reconnection.
 
 ## Persisted data
 
 Store no raw command line, prompt, or transcript content. Keep the state root
-absolute, current-user-owned, non-symlinked, and private. Bound hook input,
-identifier length, state size, agent records, and history.
+absolute, current-user-owned, non-symlinked, and private. Bound Hook input, identity
+arrays, active records, history, lock waits, snapshot time, and serialized state
+size.
 
-## Claims
-
-An inventory proves only that matching child processes were resident at that
-moment. A `retained-candidate` proves that the recorded identities still matched
-at Stop; it does not prove which subagent launched them or that they would remain
-indefinitely.
+`retained-candidate` is historical Stop evidence. Use redacted fresh revalidation
+before discussing current liveness, and never publish session IDs, agent IDs, PIDs,
+or command fingerprints by default.

@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex MCP Guard"
-  short_description: "Audit retained Codex subagent MCP helpers"
-  default_prompt: "Use $codex-mcp-guard to inspect retained MCP helper candidates without terminating processes."
+  short_description: "Read-only MCP candidate audit; no cleanup"
+  default_prompt: "Use $codex-mcp-guard:codex-mcp-guard to audit candidate MCP helpers without asserting ownership."
