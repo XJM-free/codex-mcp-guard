@@ -297,11 +297,8 @@ def status_summary(
         for item in history:
             if not isinstance(item, Mapping):
                 continue
-            try:
-                timestamp = float(item["at"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if math.isfinite(timestamp):
+            timestamp = _safe_timestamp(item.get("at"))
+            if timestamp is not None:
                 timestamps.append(timestamp)
         latest_event_at = max(timestamps) if timestamps else None
     observed_at = float(clock())
@@ -309,7 +306,7 @@ def status_summary(
         "mode": "audit-only",
         "ownership": "unproven",
         "ledger_present": ledger_present,
-        "state_version": state.get("version"),
+        "state_version": _safe_optional_nonnegative_int(state.get("version")),
         "record_count": len(valid_records),
         "status_counts": dict(sorted(counts.items())),
         "recorded_live_identity_count": sum(
@@ -515,11 +512,8 @@ def _print_doctor_summary(report: Mapping[str, object]) -> None:
 
 def _record_time(record: Mapping[str, Any]) -> float:
     for field in ("stopped_event_at", "started_event_at"):
-        try:
-            value = float(record.get(field, 0.0))
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(value):
+        value = _safe_timestamp(record.get(field))
+        if value is not None:
             return value
     return 0.0
 
@@ -542,21 +536,21 @@ def _format_bytes(value: object) -> str:
 
 
 def _safe_int(value: object) -> int:
-    try:
-        number = int(value or 0)
-    except (TypeError, ValueError):
-        return 0
-    return max(0, number)
+    return _safe_optional_nonnegative_int(value) or 0
 
 
 def _safe_optional_nonnegative_int(value: object) -> int | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return max(0, number)
+    if not 0 <= number <= sys.maxsize:
+        return None
+    if isinstance(value, float) and value != number:
+        return None
+    return number
 
 
 def _complete_rss_sum(values: list[object]) -> int | None:
@@ -567,11 +561,16 @@ def _complete_rss_sum(values: list[object]) -> int | None:
 
 
 def _safe_timestamp(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
         timestamp = float(value)
-    except (TypeError, ValueError):
+        if not math.isfinite(timestamp):
+            return None
+        datetime.fromtimestamp(timestamp, timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
         return None
-    return timestamp if math.isfinite(timestamp) else None
+    return timestamp
 
 
 def _safe_label(value: object, allowed: set[str]) -> str:

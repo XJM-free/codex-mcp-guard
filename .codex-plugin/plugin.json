@@ -3,7 +3,7 @@
   "version": "0.1.0-alpha.2",
   "description": "Read-only lifecycle auditing for MCP helpers correlated with Codex subagents.",
   "author": {
-    "name": "Jesse Vale",
+    "name": "Quiet Orbit",
     "url": "https://github.com/XJM-free"
   },
   "homepage": "https://github.com/XJM-free/codex-mcp-guard",
@@ -15,7 +15,7 @@
     "displayName": "Codex MCP Guard",
     "shortDescription": "Read-only MCP candidate audit; no cleanup",
     "longDescription": "Compares read-only process snapshots across subagent lifecycle hooks and reports ambiguous or retained window candidates without claiming ownership.",
-    "developerName": "Jesse Vale",
+    "developerName": "Quiet Orbit",
     "category": "Productivity",
     "capabilities": ["Diagnostics", "Read-only"],
     "websiteURL": "https://github.com/XJM-free/codex-mcp-guard",
