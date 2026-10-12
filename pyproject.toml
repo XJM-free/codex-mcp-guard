@@ -9,7 +9,7 @@ description = "A read-only lifecycle auditor for MCP helpers correlated with Cod
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Jesse Vale" }]
+authors = [{ name = "Quiet Orbit" }]
 keywords = ["codex", "mcp", "subagent", "process", "lifecycle"]
 classifiers = [
   "Development Status :: 3 - Alpha",

@@ -28,6 +28,49 @@ class FakeBackend(ProcessBackend):
 
 
 class CliTests(unittest.TestCase):
+    def test_corrupt_summary_numbers_do_not_crash_or_invent_known_rss(self) -> None:
+        for value in (float("inf"), float("nan"), -1, 1.5, True, 10**100):
+            with self.subTest(value=value):
+                report = status_summary(
+                    {
+                        "version": "PRIVATE-VERSION-SENTINEL",
+                        "agents": {
+                            "a": {
+                                "status": "retained-candidate",
+                                "live_process_count": value,
+                                "live_group_rss_bytes": value,
+                            }
+                        },
+                    },
+                    clock=lambda: 30.0,
+                )
+                self.assertEqual(report["recorded_live_identity_count"], 0)
+                self.assertIsNone(report["recorded_live_group_rss_bytes"])
+                self.assertIsNone(report["state_version"])
+                self.assertNotIn("PRIVATE-VERSION-SENTINEL", json.dumps(report))
+
+    def test_unrepresentable_timestamps_are_omitted(self) -> None:
+        for value in (float("inf"), float("nan"), 1e300, -1e300, True):
+            with self.subTest(value=value):
+                report = status_summary(
+                    {
+                        "agents": {
+                            "a": {
+                                "status": "observing",
+                                "started_event_at": value,
+                                "stopped_event_at": value,
+                            }
+                        },
+                        "history": [{"at": value}, {"at": 25.0}],
+                    },
+                    clock=lambda: 30.0,
+                )
+                self.assertEqual(report["latest_event_at"], 25.0)
+                self.assertEqual(report["latest_event_at_iso"], "1970-01-01T00:00:25Z")
+                record = report["recent_records"][0]
+                self.assertIsNone(record["started_event_at"])
+                self.assertIsNone(record["stopped_event_at"])
+
     def test_oversized_hook_input_is_rejected(self) -> None:
         error_output = io.StringIO()
         with (

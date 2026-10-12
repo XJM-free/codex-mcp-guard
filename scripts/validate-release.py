@@ -57,8 +57,8 @@ def main() -> int:
     version = manifest.get("version")
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         fail("plugin version is not strict semantic versioning")
-    if manifest.get("author", {}).get("name") != "Jesse Vale":
-        fail("public author alias is not Jesse Vale")
+    if manifest.get("author", {}).get("name") != "Quiet Orbit":
+        fail("public author does not match Quiet Orbit")
     if manifest.get("skills") != "./skills/":
         fail("plugin skill path must be ./skills/")
 
